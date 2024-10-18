@@ -3,30 +3,31 @@ import org.apache.hadoop.fs.*;
 import org.apache.hadoop.io.IntWritable;
 import org.apache.hadoop.io.LongWritable;
 import org.apache.hadoop.io.Text;
-import org.apache.hadoop.mapred.*;
 import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.Mapper;
+import org.apache.hadoop.mapreduce.Reducer;
+import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.ObjectOutputStream;
+import java.io.*;
 import java.util.ArrayList;
-import java.util.Iterator;
 import java.util.List;
+
+// Định nghĩa lớp Constant để lưu các giá trị MAX_PARTITION
+
 
 public class Hadoop {
 
     // MapPhase: Xử lý dữ liệu đầu vào và xác định partition dựa trên giá trị
-    public static class MapPhase extends MapReduceBase implements
-            Mapper<LongWritable, Text, Text, IntWritable> {
+    public static class MapPhase extends Mapper<LongWritable, Text, Text, IntWritable> {
 
         @Override
-        public void map(LongWritable key, Text value, OutputCollector<Text, IntWritable> outputCollector, Reporter reporter) throws IOException {
+        public void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
             try {
                 String line = value.toString();
                 int each_line_data = Integer.parseInt(line.trim());
                 Text each_line_key = new Text(determineKey(each_line_data));
-                outputCollector.collect(each_line_key, new IntWritable(each_line_data));
+                context.write(each_line_key, new IntWritable(each_line_data));
             } catch (NumberFormatException e) {
                 System.err.println("Lỗi định dạng số: " + value.toString());
             }
@@ -48,31 +49,29 @@ public class Hadoop {
     }
 
     // ReducePhase: Xây dựng B+ Tree và ghi ra HDFS
-    public static class ReducePhase extends MapReduceBase implements Reducer<Text, IntWritable, Text, Text> {
+    public static class ReducePhase extends Reducer<Text, IntWritable, Text, Text> {
 
         @Override
-        public void reduce(Text key, Iterator<IntWritable> values, OutputCollector<Text, Text> output, Reporter reporter) throws IOException {
+        public void reduce(Text key, Iterable<IntWritable> values, Context context) throws IOException, InterruptedException {
             // Khởi tạo danh sách để chứa các giá trị
             List<Integer> valueList = new ArrayList<>();
 
             // Thêm các giá trị vào danh sách
-            while (values.hasNext()) {
-                int value = values.next().get();
-                valueList.add(value);
+            for (IntWritable value : values) {
+                valueList.add(value.get());
             }
 
-            // Kiểm tra nếu danh sách trống, không cần tiếp tục xử lý
             if (valueList.isEmpty()) {
                 System.err.println("Không có giá trị nào cho khóa: " + key.toString());
                 return;
             }
 
-            // Xây dựng B+ Tree từ danh sách giá trị
-            BPlusTree bPlusTree = new BPlusTree(4); // Order của B+ Tree
+            BPlusTree bPlusTree = new BPlusTree(10); // Order của B+ Tree
             bPlusTree.buildBottomUp(valueList);
 
+
             // Phát ra thông tin sau khi hoàn thành ghi B+ Tree
-            output.collect(key, new Text("Chiều cao cây " + key.toString() + " " + bPlusTree.getHeight()));
+            context.write(new Text("Chiều cao cây " + key.toString() + ": "), new Text(String.valueOf(bPlusTree.getHeight())));
         }
     }
 
@@ -80,43 +79,46 @@ public class Hadoop {
     public static void main(String[] args) throws Exception {
         long totalStartTime = System.currentTimeMillis();
 
-        JobConf conf = new JobConf(Hadoop.class);
-        conf.setJobName("BPlusTree");
-        conf.setNumMapTasks(3);
-        conf.setNumReduceTasks(5);
+        Configuration conf = new Configuration();
+        Job job = Job.getInstance(conf, "BPlusTree");
+        job.setJarByClass(Hadoop.class);
 
         // Cấu hình mapper và reducer
-        conf.setOutputKeyClass(Text.class);
-        conf.setOutputValueClass(IntWritable.class);
-        conf.setMapperClass(MapPhase.class);
-        conf.setReducerClass(ReducePhase.class);
+        job.setMapperClass(MapPhase.class);
+        job.setReducerClass(ReducePhase.class);
+
+        job.setOutputKeyClass(Text.class); // Key là Text
+        job.setOutputValueClass(IntWritable.class); // Value là IntWritable
 
         // Đường dẫn vào và ra
-        FileInputFormat.setInputPaths(conf, new Path(args[0]));
-        FileOutputFormat.setOutputPath(conf, new Path(args[1]));
+        FileInputFormat.addInputPath(job, new Path(args[0]));
+        FileOutputFormat.setOutputPath(job, new Path(args[1]));
 
         try {
             long startTimeJob = System.currentTimeMillis(); // Thời gian bắt đầu job
-            JobClient.runJob(conf);
+            boolean success = job.waitForCompletion(true);
             long endTimeJob = System.currentTimeMillis(); // Thời gian kết thúc job
             System.out.println("Thời gian thực thi job Hadoop: " + (endTimeJob - startTimeJob) + "ms");
 
-            // Đọc kết quả từ thư mục đầu ra
-            FileSystem fs = FileSystem.get(conf);
-            Path outputPath = new Path(args[1]);
-            // Duyệt qua các file trong thư mục đầu ra
-            for (FileStatus status : fs.listStatus(outputPath)) {
-                if (status.isFile()) {
-                    try (FSDataInputStream in = fs.open(status.getPath());
-                         BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
-                        String line;
-                        while ((line = reader.readLine()) != null) {
-                            System.out.println(line);
+            if (success) {
+                // Đọc kết quả từ thư mục đầu ra
+                FileSystem fs = FileSystem.get(conf);
+                Path outputPath = new Path(args[1]);
+                // Duyệt qua các file trong thư mục đầu ra
+                for (FileStatus status : fs.listStatus(outputPath)) {
+                    if (status.isFile()) {
+                        try (FSDataInputStream in = fs.open(status.getPath());
+                             BufferedReader reader = new BufferedReader(new InputStreamReader(in))) {
+                            String line;
+                            while ((line = reader.readLine()) != null) {
+                                System.out.println(line);
+                            }
                         }
                     }
                 }
+            } else {
+                System.err.println("Job Hadoop thất bại.");
             }
-
         } catch (Exception e) {
             System.err.println("Đã xảy ra lỗi khi chạy job Hadoop: " + e.getMessage());
             e.printStackTrace();
@@ -125,5 +127,4 @@ public class Hadoop {
         long totalEndTime = System.currentTimeMillis(); // Thời gian kết thúc toàn bộ quy trình
         System.out.println("Tổng thời gian thực thi: " + (totalEndTime - totalStartTime) + "ms");
     }
-
 }

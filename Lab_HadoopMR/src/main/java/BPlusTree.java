@@ -13,8 +13,6 @@ import java.util.List;
  * @author andymai
  */
 public class BPlusTree implements Serializable {
-    private static final long serialVersionUID = 1L;
-
     // Root node of the tree
     private Node root;
 
